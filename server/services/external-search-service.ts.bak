@@ -1,0 +1,928 @@
+import axios from 'axios';
+import { db } from '../db';
+import { facilities, events, approvalStatuses } from '@shared/schema';
+import { eq } from 'drizzle-orm';
+
+interface EventLocation {
+  name: string;
+  address: string;
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
+}
+
+/**
+ * Service to fetch external events using Perplexity API or fallback to Google/DeepSeek AI
+ */
+export class ExternalSearchService {
+  private googleApiKey: string | undefined;
+  private googleSearchEngineId: string | undefined;
+  private deepseekApiKey: string | undefined;
+  private perplexityApiKey: string | undefined;
+  private useMockData: boolean = false;
+  private usePerplexityApi: boolean = false;
+
+  constructor() {
+    this.googleApiKey = process.env.GOOGLE_API_KEY;
+    this.googleSearchEngineId = process.env.GOOGLE_SEARCH_ENGINE_ID;
+    this.deepseekApiKey = process.env.DEEPSEEK_API_KEY;
+    this.perplexityApiKey = process.env.PERPLEXITY_API_KEY;
+    
+    if (this.perplexityApiKey) {
+      console.log('Perplexity API key found, will use real data search');
+      this.usePerplexityApi = true;
+    } else {
+      console.warn('PERPLEXITY_API_KEY not found. Will fallback to other methods.');
+    }
+    
+    if (!this.googleApiKey || !this.googleSearchEngineId) {
+      console.warn('GOOGLE_API_KEY or GOOGLE_SEARCH_ENGINE_ID not found. Using mock data for Google Search.');
+      this.useMockData = true;
+    }
+    
+    if (!this.deepseekApiKey) {
+      console.warn('DEEPSEEK_API_KEY not found. Using mock data for DeepSeek AI.');
+      this.useMockData = true;
+    }
+    
+    // If we have Perplexity API but not the others, we still can get real data
+    if (this.usePerplexityApi) {
+      this.useMockData = false;
+    }
+  }
+
+  /**
+   * Search for external events using Perplexity API for direct data generation
+   */
+  async searchExternalEvents(
+    type: string, 
+    startDate?: string, 
+    endDate?: string, 
+    category?: string
+  ): Promise<any[]> {
+    console.log(`Searching for external events with type: ${type}, dates: ${startDate} to ${endDate}, category: ${category}`);
+    
+    // First check if we have Perplexity API key
+    if (this.usePerplexityApi) {
+      console.log('Using Perplexity API for events search');
+      
+      try {
+        // Construct a search query based on the filters
+        let query = 'List of upcoming sports events in Hong Kong';
+        
+        if (type) {
+          query = `List of upcoming ${type} events in Hong Kong`;
+        }
+        
+        if (category) {
+          query += ` - ${category} events`;
+        }
+        
+        if (startDate && endDate) {
+          query += ` between ${startDate} and ${endDate}`;
+        } else if (startDate) {
+          query += ` after ${startDate}`;
+        } else if (endDate) {
+          query += ` before ${endDate}`;
+        }
+        
+        // Return results from Perplexity API
+        return await this.searchEventsWithPerplexity(query, type, category, startDate, endDate);
+      } catch (error) {
+        console.error('Error using Perplexity API:', error);
+        console.error('Cannot fallback to mock data - no fallbacks allowed');
+        // Return empty array instead of mock data
+        return [];
+      }
+    } else {
+      console.log('No Perplexity API key available for events search');
+      // Return empty array instead of mock data
+      return [];
+    }
+    
+    try {
+      // Only reached if usePerplexityApi is false and useMockData is false
+      // Uses Google + DeepSeek combination
+      let query = 'List of upcoming sports events in Hong Kong';
+      
+      if (type) {
+        query = `List of upcoming ${type} events in Hong Kong`;
+      }
+      
+      if (category) {
+        query += ` - ${category} events`;
+      }
+      
+      if (startDate && endDate) {
+        query += ` between ${startDate} and ${endDate}`;
+      } else if (startDate) {
+        query += ` after ${startDate}`;
+      } else if (endDate) {
+        query += ` before ${endDate}`;
+      }
+      
+      console.log(`Making Perplexity API request with query: "${query}"`);
+      
+      // Check if we have Perplexity API key
+      if (!this.perplexityApiKey) {
+        console.error('Perplexity API key is not available. Cannot make API request.');
+        throw new Error('Perplexity API key not configured');
+      }
+      
+      const response = await axios.post(
+        'https://api.perplexity.ai/chat/completions',
+        {
+          model: 'llama-3.1-sonar-small-128k-online',
+          messages: [
+            {
+              role: 'system',
+              content: `You are a helpful assistant that provides accurate and detailed information about sports events in Hong Kong.
+
+For each event, include the following fields in a structured format:
+1. Name of the event
+2. Date in YYYY-MM-DD format
+3. Start time and end time in 24-hour format (HH:MM)
+4. Location name and address
+5. Sport type (basketball, tennis, swimming, etc.)
+6. Event category (competition, lessons, watching a match, training, tournament, etc.)
+7. Description of the event
+8. Website URL for registration or more information
+9. GPS coordinates (latitude and longitude)
+10. Image URL if available
+11. Skill level required (beginner, intermediate, advanced, expert, or all levels)
+12. Maximum participants (if applicable)
+
+Format each event consistently. Be precise with details, especially coordinates, dates, and URLs. Do not make up information if you don't have it.`
+            },
+            {
+              role: 'user',
+              content: query + " Include all available details for each event: name, date, time, location, sport type, category, description, website, coordinates, image URL, skill level, and maximum participants. Please list complete information for each event in a consistent format."
+            }
+          ],
+          max_tokens: 2000,
+          temperature: 0.2,
+          frequency_penalty: 1,
+          stream: false
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.perplexityApiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      console.log('Perplexity API response received for events search');
+      
+      const content = response.data.choices[0].message.content;
+      
+      // Parse the response content and extract event information
+      // For Perplexity API, we need to parse the text content differently
+      const events = this.parseEventsFromResponse(content, type, category);
+      
+      return events;
+    } catch (error) {
+      console.error('Error in external events search:', error);
+      console.error('Cannot use mock data - returning empty array');
+      return [];
+    }
+  }
+  
+  /**
+   * Perform a Google Custom Search for events
+   */
+  private async performGoogleSearch(
+    type: string, 
+    startDate?: string, 
+    endDate?: string, 
+    category?: string
+  ): Promise<any[]> {
+    try {
+      // Construct search query based on parameters
+      let query = 'sports events hong kong';
+      
+      if (type) {
+        query = `${type} ${query}`;
+      }
+      
+      if (category) {
+        query = `${category} ${query}`;
+      }
+      
+      if (startDate) {
+        // Format the date as YYYY-MM-DD for Google search
+        query = `${query} after:${startDate}`;
+      }
+      
+      if (endDate) {
+        query = `${query} before:${endDate}`;
+      }
+      
+      console.log(`Performing Google search with query: "${query}"`);
+      
+      const response = await axios.get(
+        'https://www.googleapis.com/customsearch/v1',
+        {
+          params: {
+            key: this.googleApiKey,
+            cx: this.googleSearchEngineId,
+            q: query,
+            num: 10 // number of results to return
+          }
+        }
+      );
+      
+      if (response.data && response.data.items) {
+        console.log(`Found ${response.data.items.length} search results from Google`);
+        return response.data.items.map((item: any) => ({
+          title: item.title,
+          link: item.link,
+          snippet: item.snippet,
+          pagemap: item.pagemap // May contain structured data like dates, images, etc.
+        }));
+      }
+      
+      return [];
+    } catch (error) {
+      console.error('Error performing Google search:', error);
+      return [];
+    }
+  }
+  
+  /**
+   * Use DeepSeek AI to extract structured event data from search results
+   */
+  private async extractEventsWithDeepSeek(
+    searchResults: any[], 
+    type: string, 
+    startDate?: string, 
+    endDate?: string, 
+    category?: string
+  ): Promise<any[]> {
+    try {
+      const searchContent = JSON.stringify(searchResults.map(r => ({
+        title: r.title,
+        link: r.link,
+        description: r.snippet
+      })));
+      
+      // Prompt for DeepSeek to extract structured events data
+      const prompt = `
+Extract sports events in Hong Kong from the following search results:
+${searchContent}
+
+Instructions:
+1. Create a JSON array of event objects with the following fields:
+  - name: Event name
+  - eventDate: Date of the event in YYYY-MM-DD format
+  - startTime: Start time in 24h format (HH:MM)
+  - endTime: End time in 24h format (HH:MM)
+  - location: Object with name and address fields
+  - sportType: Type of sport (e.g., basketball, soccer, tennis, running, swimming, etc.)
+  - description: Brief description of the event
+  - website: URL of the event website
+  - imageUrl: URL of an image for the event if available
+  - skillLevel: Required skill level (beginner, intermediate, advanced, expert, or all_levels)
+  - maxParticipants: Maximum number of participants (if available)
+  
+2. Only include complete event information. Discard events with missing critical fields.
+3. If multiple events are found, group them properly.
+4. Only return valid JSON without any explanations or prefixes.
+      `;
+
+      console.log(`Making DeepSeek API request to extract structured event data`);
+      
+      const response = await axios.post(
+        'https://api.deepseek.com/v1/chat/completions',
+        {
+          model: 'deepseek-chat',
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a data extraction assistant that extracts structured information about sports events from search results.'
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.1,
+          max_tokens: 4000,
+          response_format: { type: 'json_object' }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.deepseekApiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (response.data && response.data.choices && response.data.choices.length > 0) {
+        const content = response.data.choices[0].message.content;
+        
+        try {
+          const parsedEvents = JSON.parse(content);
+          console.log(`Successfully extracted ${parsedEvents.events?.length || 0} events from search results`);
+          
+          // Prepare events data in our expected format
+          return this.processExtractedEvents(parsedEvents.events || []);
+        } catch (parseError) {
+          console.error('Error parsing JSON from DeepSeek response:', parseError);
+          return [];
+        }
+      }
+      
+      return [];
+    } catch (error) {
+      console.error('Error extracting events with DeepSeek:', error);
+      return [];
+    }
+  }
+  
+  /**
+   * Parse events from Perplexity API response text
+   * Simpler implementation that correctly extracts and consolidates event information
+   */
+  private parseEventsFromResponse(content: string, defaultType?: string, defaultCategory?: string): any[] {
+    console.log('Parsing events from Perplexity API response text');
+    
+    // Store events by name to avoid creating duplicates
+    const eventMap = new Map<string, any>();
+    const lines = content.split('\n');
+    
+    // Track the current event being built
+    let currentEvent: any = null;
+    let currentEventName: string | null = null;
+    
+    // Process each line
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      // Skip empty lines
+      if (!line) continue;
+      
+      // Check if this is a numbered event (e.g., "1. Event Name")
+      const numberedEventMatch = line.match(/^(\d+)\.\s+(.+)$/);
+      if (numberedEventMatch) {
+        // Save previous event if it exists
+        if (currentEvent && currentEventName) {
+          saveEvent(eventMap, currentEventName, currentEvent);
+        }
+        
+        // Start a new event
+        currentEventName = numberedEventMatch[2];
+        currentEvent = createNewEvent(currentEventName, defaultType, defaultCategory);
+        continue;
+      }
+      
+      // Check if this is a bulleted event (e.g., "* Event Name" or "- Event Name")
+      const bulletedEventMatch = line.match(/^[-*]\s+(.+)$/);
+      if (bulletedEventMatch) {
+        // Save previous event if it exists
+        if (currentEvent && currentEventName) {
+          saveEvent(eventMap, currentEventName, currentEvent);
+        }
+        
+        // Start a new event
+        currentEventName = bulletedEventMatch[1];
+        currentEvent = createNewEvent(currentEventName, defaultType, defaultCategory);
+        continue;
+      }
+      
+      // Process key-value pairs for the current event
+      if (currentEvent) {
+        const keyValueMatch = line.match(/\*\*([^:]+):\*\*\s*(.+)/);
+        if (keyValueMatch) {
+          const key = keyValueMatch[1].toLowerCase().trim();
+          const value = keyValueMatch[2].trim();
+          
+          // Process the field based on its key
+          this.processEventField(currentEvent, key, value);
+        } else if (line && !line.match(/^[-*]$/) && !line.match(/^\d+\.$/)) {
+          // If line doesn't match any pattern but has content, add it to description
+          if (currentEvent.description) {
+            currentEvent.description += ' ' + line;
+          } else {
+            currentEvent.description = line;
+          }
+        }
+      }
+    }
+    
+    // Don't forget to add the last event
+    if (currentEvent && currentEventName) {
+      saveEvent(eventMap, currentEventName, currentEvent);
+    }
+    
+    // Convert Map to array for final processing
+    const uniqueEvents = Array.from(eventMap.values());
+    console.log(`Found ${uniqueEvents.length} unique events after deduplication`);
+    
+    // Post-process events to ensure they have all required fields
+    return uniqueEvents.map(event => this.finalizeEvent(event, defaultType, defaultCategory));
+  }
+  
+  /**
+   * Create a new event object with default values
+   */
+  private createNewEvent(name: string, defaultType?: string, defaultCategory?: string): any {
+    return {
+      name: name,
+      sportType: defaultType || 'other',
+      category: defaultCategory || 'competition',
+      skillLevel: 'all_levels',
+      searchSource: 'perplexity_api',
+      startTime: '09:00',
+      endTime: '18:00',
+      location: {
+        name: 'Hong Kong',
+        address: 'Hong Kong',
+        coordinates: {
+          latitude: 22.3193,
+          longitude: 114.1694
+        }
+      }
+    };
+  }
+  
+  /**
+   * Process a single field of an event based on the key and value
+   */
+  private processEventField(event: any, key: string, value: string): void {
+    switch (key) {
+      case 'name':
+        event.name = value;
+        break;
+      case 'date':
+        try {
+          const dateMatch = value.match(/(\d{4}-\d{2}-\d{2})/);
+          if (dateMatch) {
+            event.eventDate = dateMatch[1];
+          } else {
+            // Try other date formats
+            const date = new Date(value);
+            if (!isNaN(date.getTime())) {
+              event.eventDate = this.formatDateString(date);
+            }
+          }
+        } catch (err) {
+          console.warn('Error parsing date:', value);
+        }
+        break;
+      case 'time':
+        const timeMatch = value.match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/);
+        if (timeMatch) {
+          event.startTime = timeMatch[1];
+          event.endTime = timeMatch[2];
+        }
+        break;
+      case 'start time':
+        const startTimeMatch = value.match(/(\d{1,2}:\d{2})/);
+        if (startTimeMatch) event.startTime = startTimeMatch[1];
+        break;
+      case 'end time':
+        const endTimeMatch = value.match(/(\d{1,2}:\d{2})/);
+        if (endTimeMatch) event.endTime = endTimeMatch[1];
+        break;
+      case 'location':
+        if (!event.location) {
+          event.location = { 
+            name: value, 
+            address: value,
+            coordinates: {
+              latitude: 22.3193,
+              longitude: 114.1694
+            }
+          };
+        } else {
+          event.location.name = value;
+        }
+        break;
+      case 'address':
+        if (!event.location) {
+          event.location = { 
+            name: "Hong Kong", 
+            address: value,
+            coordinates: {
+              latitude: 22.3193,
+              longitude: 114.1694
+            }
+          };
+        } else {
+          event.location.address = value;
+        }
+        break;
+      case 'sport type':
+      case 'sport':
+        event.sportType = this.normalizeSportType(value);
+        break;
+      case 'category':
+        event.category = this.normalizeEventCategory(value);
+        break;
+      case 'description':
+        event.description = value;
+        break;
+      case 'website':
+      case 'website url':
+        event.website = value;
+        break;
+      case 'image url':
+      case 'image':
+        event.imageUrl = value;
+        break;
+      case 'coordinates':
+      case 'gps coordinates':
+        try {
+          const coordMatch = value.match(/(-?\d+\.\d+),\s*(-?\d+\.\d+)/);
+          if (coordMatch) {
+            if (!event.location) {
+              event.location = {
+                name: "Hong Kong",
+                address: "Hong Kong"
+              };
+            }
+            event.location.coordinates = {
+              latitude: parseFloat(coordMatch[1]),
+              longitude: parseFloat(coordMatch[2])
+            };
+          }
+        } catch (err) {
+          console.warn('Error parsing coordinates:', value);
+        }
+        break;
+      case 'skill level':
+        event.skillLevel = this.normalizeSkillLevel(value);
+        break;
+      case 'max participants':
+      case 'maximum participants':
+        try {
+          const maxParts = parseInt(value);
+          if (!isNaN(maxParts)) event.maxParticipants = maxParts;
+        } catch (err) {
+          console.warn('Error parsing max participants:', value);
+        }
+        break;
+    }
+  }
+  
+  /**
+   * Save an event to the event map, merging with existing event if needed
+   */
+  private saveEvent(eventMap: Map<string, any>, eventName: string, event: any): void {
+    if (!eventMap.has(eventName)) {
+      eventMap.set(eventName, event);
+    } else {
+      // Update existing event
+      const existingEvent = eventMap.get(eventName);
+      Object.keys(event).forEach(key => {
+        if (!existingEvent[key] && event[key]) {
+          existingEvent[key] = event[key];
+        }
+      });
+    }
+  }
+  
+  /**
+   * Finalize an event by ensuring all required fields are present
+   */
+  private finalizeEvent(event: any, defaultType?: string, defaultCategory?: string): any {
+    // Process dates and times
+    const eventDate = event.eventDate || this.formatDateString(new Date());
+    const startTime = event.startTime || '09:00';
+    const endTime = event.endTime || '18:00';
+    
+    // Process location
+    let location = event.location || { 
+      name: event.name || 'Hong Kong',
+      address: 'Hong Kong',
+      coordinates: {
+        latitude: 22.3193,
+        longitude: 114.1694
+      }
+    };
+    
+    // Set default coordinates if none present
+    if (!location.coordinates) {
+      location.coordinates = {
+        latitude: 22.3193,
+        longitude: 114.1694
+      };
+    }
+    
+    return {
+      name: event.name,
+      eventDate: eventDate,
+      startTime: startTime,
+      endTime: endTime,
+      sportType: event.sportType || defaultType || 'other',
+      category: event.category || defaultCategory || 'competition',
+      description: event.description || '',
+      skillLevel: event.skillLevel || 'all_levels',
+      maxParticipants: event.maxParticipants || 50,
+      website: event.website || null,
+      imageUrl: event.imageUrl || null,
+      location: location,
+      searchSource: 'perplexity_api'
+    };
+  }
+  }
+  
+  /**
+   * Normalize sport type to match our schema
+   */
+  private normalizeSportType(type: string): string {
+    type = type.toLowerCase();
+    
+    if (type.includes('basketball')) return 'basketball';
+    if (type.includes('soccer') || type.includes('football')) return 'soccer';
+    if (type.includes('tennis')) return 'tennis';
+    if (type.includes('badminton')) return 'badminton';
+    if (type.includes('swimming')) return 'swimming';
+    if (type.includes('running') || type.includes('jogging')) return 'running';
+    if (type.includes('fitness') || type.includes('gym')) return 'fitness';
+    
+    return 'other';
+  }
+  
+  /**
+   * Normalize event category to match our schema
+   */
+  private normalizeEventCategory(category: string): string {
+    category = category.toLowerCase();
+    
+    if (category.includes('competition') || category.includes('tournament')) return 'competition';
+    if (category.includes('lesson') || category.includes('training') || category.includes('class')) return 'lessons';
+    if (category.includes('watching') || category.includes('spectator')) return 'watching';
+    
+    return 'competition';
+  }
+  
+  /**
+   * Normalize skill level to match our schema
+   */
+  private normalizeSkillLevel(level: string): string {
+    level = level.toLowerCase();
+    
+    if (level.includes('beginner')) return 'beginner';
+    if (level.includes('intermediate')) return 'intermediate';
+    if (level.includes('advanced')) return 'advanced';
+    if (level.includes('expert')) return 'expert';
+    if (level.includes('all')) return 'all_levels';
+    
+    return 'all_levels';
+  }
+  
+  /**
+   * Process extracted events into our application's format
+   */
+  private processExtractedEvents(extractedEvents: any[]): any[] {
+    return extractedEvents.map(event => {
+      // Process dates and times
+      const eventDate = event.eventDate || this.formatDateString(new Date());
+      const startTime = event.startTime || '09:00';
+      const endTime = event.endTime || '18:00';
+      
+      // Process location
+      let location: any = null;
+      if (event.location) {
+        location = {
+          name: event.location.name || event.name,
+          address: event.location.address || 'Hong Kong'
+        };
+        
+        // Add coordinates if available
+        if (event.location.coordinates) {
+          location.coordinates = event.location.coordinates;
+        }
+      }
+      
+      return {
+        name: event.name,
+        eventDate: eventDate,
+        startTime: startTime,
+        endTime: endTime,
+        sportType: event.sportType || 'other',
+        category: event.category || 'competition',
+        description: event.description || '',
+        skillLevel: event.skillLevel || 'all_levels',
+        maxParticipants: event.maxParticipants || 50,
+        website: event.website || null,
+        imageUrl: event.imageUrl || null,
+        location: location,
+        searchSource: 'google_deepseek'
+      };
+    });
+  }
+  
+  /**
+   * Search events using Perplexity API
+   */
+  private async searchEventsWithPerplexity(
+    query: string,
+    type?: string,
+    category?: string,
+    startDate?: string,
+    endDate?: string
+  ): Promise<any[]> {
+    console.log(`Making Perplexity API request with query: "${query}"`);
+    
+    if (!this.perplexityApiKey) {
+      console.error('Perplexity API key is not available. Cannot make API request.');
+      throw new Error('Perplexity API key not configured');
+    }
+    
+    try {
+      const response = await axios.post(
+        'https://api.perplexity.ai/chat/completions',
+        {
+          model: 'llama-3.1-sonar-small-128k-online',
+          messages: [
+            {
+              role: 'system',
+              content: `You are a helpful assistant that provides accurate and detailed information about sports events in Hong Kong.
+
+For each event, include the following fields in a structured format:
+1. Name of the event
+2. Date in YYYY-MM-DD format
+3. Start time and end time in 24-hour format (HH:MM)
+4. Location name and address
+5. Sport type (basketball, tennis, swimming, etc.)
+6. Event category (competition, lessons, watching a match, training, tournament, etc.)
+7. Description of the event
+8. Website URL for registration or more information
+9. GPS coordinates (latitude and longitude)
+10. Image URL if available
+11. Skill level required (beginner, intermediate, advanced, expert, or all levels)
+12. Maximum participants (if applicable)
+
+Format each event consistently. Be precise with details, especially coordinates, dates, and URLs. Do not make up information if you don't have it.`
+            },
+            {
+              role: 'user',
+              content: query + " Include all available details for each event: name, date, time, location, sport type, category, description, website, coordinates, image URL, skill level, and maximum participants. Please list complete information for each event in a consistent format."
+            }
+          ],
+          max_tokens: 2000,
+          temperature: 0.2,
+          frequency_penalty: 1,
+          stream: false
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.perplexityApiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      console.log('Perplexity API response received for events search');
+      
+      if (!response.data || !response.data.choices || !response.data.choices[0]) {
+        console.error('Invalid response structure from Perplexity API', response.data);
+        throw new Error('Invalid response from Perplexity API');
+      }
+      
+      const content = response.data.choices[0].message.content;
+      
+      // Parse the response content and extract event information
+      const events = this.parseEventsFromResponse(content, type, category);
+      console.log(`Successfully parsed ${events.length} events from Perplexity API response`);
+      
+      return events;
+    } catch (error) {
+      console.error('Error in Perplexity API search:', error);
+      throw error; // Re-throw to be handled by the caller
+    }
+  }
+
+  /**
+   * Format a Date object to ISO date string (YYYY-MM-DD)
+   */
+  private formatDateString(date: Date): string {
+    return date.toISOString().split('T')[0];
+  }
+  
+  /**
+   * Mock data for events when APIs are not available
+   */
+  private getMockEvents(type?: string, category?: string, startDate?: string, endDate?: string): any[] {
+    const nextMonth = new Date();
+    nextMonth.setMonth(nextMonth.getMonth() + 1);
+    
+    const nextWeek = new Date();
+    nextWeek.setDate(nextWeek.getDate() + 7);
+    
+    const mockEvents = [
+      {
+        name: 'Hong Kong Basketball Tournament',
+        eventDate: this.formatDateString(nextMonth),
+        startTime: '09:00',
+        endTime: '18:00',
+        sportType: 'basketball',
+        category: 'competition',
+        description: 'Annual basketball tournament for local teams',
+        skillLevel: 'intermediate',
+        maxParticipants: 120,
+        searchSource: 'mock_data',
+        location: {
+          name: 'Hong Kong Coliseum',
+          address: '9 Cheong Wan Road, Hung Hom, Hong Kong',
+          coordinates: {
+            latitude: 22.3028,
+            longitude: 114.1827
+          }
+        },
+        website: 'https://www.example.com/hk-basketball-tournament',
+        imageUrl: 'https://example.com/images/basketball-event.jpg'
+      },
+      {
+        name: 'Community Tennis Day',
+        eventDate: this.formatDateString(nextWeek),
+        startTime: '10:00',
+        endTime: '16:00',
+        sportType: 'tennis',
+        category: 'lessons',
+        description: 'Open tennis day for all skill levels',
+        skillLevel: 'all_levels',
+        maxParticipants: 50,
+        searchSource: 'mock_data',
+        location: {
+          name: 'Victoria Park Tennis Courts',
+          address: 'Victoria Park, Causeway Bay, Hong Kong',
+          coordinates: {
+            latitude: 22.2808,
+            longitude: 114.1879
+          }
+        },
+        website: 'https://www.example.com/tennis-day',
+        imageUrl: 'https://example.com/images/tennis-event.jpg'
+      },
+      {
+        name: 'Hong Kong Marathon',
+        eventDate: this.formatDateString(nextMonth),
+        startTime: '07:00',
+        endTime: '14:00',
+        sportType: 'running',
+        category: 'competition',
+        description: 'Annual city marathon through the streets of Hong Kong',
+        skillLevel: 'all_levels',
+        maxParticipants: 10000,
+        searchSource: 'mock_data',
+        location: {
+          name: 'Victoria Park',
+          address: 'Causeway Bay, Hong Kong',
+          coordinates: {
+            latitude: 22.2810,
+            longitude: 114.1882
+          }
+        },
+        website: 'https://www.example.com/hk-marathon',
+        imageUrl: 'https://example.com/images/marathon-event.jpg'
+      }
+    ];
+    
+    // Add category field to mock events if not present
+    mockEvents.forEach((event: any) => {
+      if (!event.category) {
+        // Set default categories based on sport type
+        if (event.sportType === 'basketball' || event.sportType === 'tennis') {
+          event.category = 'competition';
+        } else if (event.sportType === 'running') {
+          event.category = 'competition';
+        } else {
+          event.category = 'lessons';
+        }
+      }
+    });
+    
+    // Filter by type, category, and date range if provided
+    return mockEvents.filter((event: any) => {
+      // Filter by type
+      if (type && event.sportType !== type) return false;
+      
+      // Filter by category
+      if (category && event.category !== category) return false;
+      
+      // Filter by date range
+      if (startDate || endDate) {
+        const eventDate = new Date(event.eventDate);
+        
+        if (startDate) {
+          const startDateObj = new Date(startDate);
+          if (eventDate < startDateObj) return false;
+        }
+        
+        if (endDate) {
+          const endDateObj = new Date(endDate);
+          if (eventDate > endDateObj) return false;
+        }
+      }
+      
+      return true;
+    });
+  }
+}
+
+export const externalSearchService = new ExternalSearchService();

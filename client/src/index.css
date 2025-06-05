@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+/* Map styles */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+  min-height: 300px;
+}
+
+.marker-basketball, 
+.marker-soccer, 
+.marker-swimming, 
+.marker-tennis, 
+.marker-badminton, 
+.marker-running, 
+.marker-fitness,
+.search-result-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Custom styling for search result marker */
+.search-result-marker {
+  z-index: 1001; /* Higher than regular markers */
+}
+
+.leaflet-popup-content-wrapper {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 0.5rem;
+}
+
+.leaflet-popup-content {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  width: auto !important;
+}
+
+.user-location {
+  z-index: 1000;
+}
+
+/* Make sure the map has proper height */
+#map, 
+.leaflet-container,
+[role="application"] {
+  height: 100%;
+  width: 100%;
+}
+
+/* Orientation change handling */
+@media screen and (orientation: portrait) {
+  body {
+    height: 100vh;
+    /* Use the viewport height as the height of the body */
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+  }
+  
+  #root {
+    height: 100%;
+    overflow: auto;
+    position: relative;
+  }
+  
+  .app-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+}
+
+@media screen and (orientation: landscape) {
+  body {
+    height: 100vh;
+    /* Use the viewport height as the height of the body */
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+  }
+  
+  #root {
+    height: 100%;
+    overflow: auto;
+    position: relative;
+  }
+  
+  .app-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  
+  /* Adjust map container for landscape */
+  .map-container {
+    flex: 1;
+    position: relative;
+    min-height: 50vh;
+  }
+}
